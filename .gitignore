@@ -1,0 +1,13 @@
+node_modules/
+.venv/
+build/
+bridge/
+dist/
+
+__pycache__/
+*.py[cod]
+
+.DS_Store
+Thumbs.db
+*.log
+pnpm-workspace.yaml

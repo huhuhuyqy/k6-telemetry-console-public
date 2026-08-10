@@ -1,0 +1,50 @@
+{
+  "name": "k6-telemetry-console",
+  "version": "0.2.4",
+  "description": "Standalone Electron window for the Flydigi K6 telemetry light controller",
+  "main": "main.js",
+  "private": true,
+  "author": "K6 Telemetry Demo",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron .",
+    "build:bridge": ".venv\\Scripts\\python.exe -m PyInstaller --noconfirm --clean --onedir --name k6-telemetry-bridge --distpath bridge --workpath build/pyinstaller --specpath build/spec ams2_bridge.py",
+    "dist:portable": "pnpm run build:bridge && electron-builder --win portable",
+    "dist": "pnpm run build:bridge && electron-builder --win portable nsis"
+  },
+  "devDependencies": {
+    "electron": "^36.3.2",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.k6.telemetry.console",
+    "productName": "K6 Telemetry Console",
+    "artifactName": "K6-Telemetry-Console-${version}-${arch}.${ext}",
+    "asar": false,
+    "files": [
+      "main.js",
+      "index.html",
+      "app.js",
+      "style.css",
+      "package.json",
+      "bridge/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        },
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}
