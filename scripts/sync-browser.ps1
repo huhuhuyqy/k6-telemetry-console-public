@@ -1,5 +1,5 @@
 param(
-  [string]$BrowserRoot = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'k6-telemetry-demo'),
+  [string]$BrowserRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'browser'),
   [switch]$Check
 )
 
