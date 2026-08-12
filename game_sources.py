@@ -42,6 +42,11 @@ def _cstring(value: bytes | bytearray) -> str:
     return bytes(value).split(b"\0", 1)[0].decode("utf-8", errors="replace").strip()
 
 
+def _kunos_gear(raw_gear: int) -> int:
+    """Convert Kunos 0=R, 1=N, 2+=forward to -1=R, 0=N, 1+=forward."""
+    return int(raw_gear) - 1
+
+
 class TransientBooleanEvent:
     """Turn a telemetry flag edge into a short, non-latching alert.
 
@@ -280,7 +285,7 @@ class AssettoCorsaReader(_MappedReader):
             "source": self.source, "connected": live or not session_live, "status": status,
             "message": message,
             "version": "AC1", "packet": int(ph.packetId), "rpm": rpm, "maxRpm": max_rpm,
-            "gear": int(ph.gear), "brake": brake, "throttle": _clamp(ph.gas, 0, 1),
+            "gear": _kunos_gear(ph.gear), "brake": brake, "throttle": _clamp(ph.gas, 0, 1),
             "clutch": _clamp(ph.clutch, 0, 1), "speedKph": max(0, float(ph.speedKmh)),
             "car": st.carModel.strip(), "shiftUpHint": live and max_rpm >= 1000 and rpm >= max_rpm * .96,
             "shiftDownHint": False, "tcActive": False, "absActive": live and bool(brake > .05 and ph.abs > 0 and slip > .1),
@@ -432,7 +437,7 @@ class AssettoCorsaCompetizioneReader(AssettoCorsaReader):
         return {
             "source": self.source, "connected": live or not session_live, "status": status,
             "message": message, "version": "ACC",
-            "packet": int(ph.packetId), "rpm": rpm, "maxRpm": max_rpm, "gear": int(ph.gear),
+            "packet": int(ph.packetId), "rpm": rpm, "maxRpm": max_rpm, "gear": _kunos_gear(ph.gear),
             "brake": brake, "throttle": _clamp(ph.gas, 0, 1), "clutch": _clamp(ph.clutch, 0, 1),
             "speedKph": speed_kph, "car": st.carModel.strip(),
             "shiftUpHint": live and max_rpm >= 1000 and rpm >= max_rpm * .96, "shiftDownHint": False,
@@ -785,10 +790,6 @@ class ForzaUdpReader(_MappedReader):
         self._last_packet_bytes = packet
         self._last_change = time.monotonic()
         return decoded
-
-
-class AssettoCorsaEvoAlias:
-    """Marker used by the bridge to keep the existing EVO reader separate."""
 
 
 def build_extra_readers() -> dict[str, _MappedReader]:

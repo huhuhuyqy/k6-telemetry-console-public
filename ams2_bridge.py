@@ -232,11 +232,11 @@ class AMS2Reader:
             "numGears": int(page.mNumGears),
             "brake": max(0.0, min(float(page.mBrake), 1.0)),
             "throttle": max(0.0, min(float(page.mThrottle), 1.0)),
-            # AMS2 exposes ABS directly.  The shared-memory page does not
-            # publish a separate TC/DRS/indicator action flag, so those cues
-            # stay false instead of being guessed from unrelated values.
+            # AMS2 exposes ABS directly.  mCarFlags bit 4 is the documented
+            # ABS fallback; the page has no separate TC/DRS/indicator action
+            # flag, so those cues stay false instead of being guessed.
             "absActive": effects_live and (bool(page.mAntiLockActive) or bool(car_flags & (1 << 4))),
-            "tcActive": effects_live and bool(car_flags & (1 << 6)),
+            "tcActive": False,
             "drsAvailable": False,
             "drsActive": False,
             "shiftUpHint": effects_live and max_rpm >= 1000.0 and rpm >= max_rpm * 0.96,
@@ -267,12 +267,32 @@ class DemoHandler(SimpleHTTPRequestHandler):
     acevo_reader: AcevoReader
     extra_readers: dict[str, object]
     root: str
+    bridge_token: str
+    bridge_version: str
+    parent_pid: int
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=self.root, **kwargs)
 
     def do_GET(self) -> None:
-        if urlparse(self.path).path == "/api/telemetry":
+        path = urlparse(self.path).path
+        if path == "/api/health":
+            payload = json.dumps({
+                "service": "k6-telemetry-bridge",
+                "version": self.bridge_version,
+                "token": self.bridge_token,
+                "pid": os.getpid(),
+                "parentPid": self.parent_pid,
+                "root": self.root,
+            }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if path == "/api/telemetry":
             query = parse_qs(urlparse(self.path).query)
             source = query.get("source", ["ams2"])[0].lower()
             if source in {"acevo", "ac-evo", "evo"}:
@@ -293,12 +313,12 @@ class DemoHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def end_headers(self) -> None:
-        if urlparse(self.path).path != "/api/telemetry":
+        if not urlparse(self.path).path.startswith("/api/"):
             self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
     def log_message(self, fmt: str, *args) -> None:
-        if urlparse(self.path).path != "/api/telemetry":
+        if not urlparse(self.path).path.startswith("/api/"):
             super().log_message(fmt, *args)
 
 
@@ -356,6 +376,8 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--root", type=Path, default=None, help="directory containing index.html, app.js and style.css")
     parser.add_argument("--parent-pid", type=int, default=None, help="exit automatically when this process ends")
+    parser.add_argument("--bridge-token", default="", help="identity token used by the Electron parent")
+    parser.add_argument("--bridge-version", default="development")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -389,6 +411,9 @@ def main() -> int:
     DemoHandler.acevo_reader = acevo_reader
     DemoHandler.extra_readers = extra_readers
     DemoHandler.root = root
+    DemoHandler.bridge_token = args.bridge_token
+    DemoHandler.bridge_version = args.bridge_version
+    DemoHandler.parent_pid = int(args.parent_pid or 0)
     server = DemoServer(("127.0.0.1", args.port), DemoHandler)
     print(f"K6 Shift Light Demo: http://localhost:{args.port}/")
     print("AMS2: Options > System > Shared Memory > Project CARS 2")

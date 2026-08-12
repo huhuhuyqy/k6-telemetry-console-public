@@ -1,15 +1,33 @@
+import {
+  COMMAND,
+  LED_RAM_ID,
+  RAM_READ_CHUNK_SIZE,
+  MAX_LIGHTING_RAM_SIZE,
+  SerialTaskQueue,
+  buildFrame,
+  clamp,
+  crc32,
+  encodeLightingBin,
+  lerp,
+  parseReadRamChunk,
+  parseResponse,
+  selectDisplayCue,
+  selectCoreCue,
+  smoothstep,
+  u16,
+  u32,
+  validateLightingRam,
+  validateRestorableLightingSnapshot,
+  wrapLightingBin,
+} from './runtime-core.mjs';
+
 const FLYDIGI_VENDOR_ID = 0x37d7;
 const K6_FILTERS = [
   { vendorId: FLYDIGI_VENDOR_ID, productId: 0x2502, usagePage: 0xffa0 },
 ];
 
-const COMMAND = { READ_RAM: 0xa3, WRITE_RAM: 0xa4 };
 // Flydigi's current web tool uses RAM 0x04 for the LGHT blob.
 // RAM 0x05 is the XMUL mapping/config domain.
-const LED_RAM_ID = 0x04;
-const RAM_READ_CHUNK_SIZE = 16;
-const MAX_LIGHTING_RAM_SIZE = 4096;
-const LIGHT_MODE_SOLID = 1;
 const REPORT_FALLBACK_SIZE = 63;
 // Flash timings are intentionally separated by cue type.  Indicators/hazards
 // need a slower automotive-style cadence, while brake feedback should become
@@ -87,11 +105,6 @@ function log(message) {
   ui.log.textContent = `[${stamp}] ${message}\n${ui.log.textContent}`.slice(0, 9000);
 }
 
-function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
-function lerp(start, end, amount) { return start + (end - start) * amount; }
-function smoothstep(amount) { return amount * amount * (3 - 2 * amount); }
-function isAms2Source() { return ui.dataSource?.value === 'ams2'; }
-function isAcevoSource() { return ui.dataSource?.value === 'acevo'; }
 const LIVE_SOURCE_NAMES = {
   ams2: 'AMS2', acevo: 'AC EVO', ac: 'Assetto Corsa', acc: 'ACC',
   lmu: 'Le Mans Ultimate', fh5: 'Forza Horizon 5', fh6: 'Forza Horizon 6',
@@ -99,104 +112,6 @@ const LIVE_SOURCE_NAMES = {
 function isLiveSource() { return Boolean(LIVE_SOURCE_NAMES[ui.dataSource?.value]); }
 function sourceName() { return LIVE_SOURCE_NAMES[ui.dataSource?.value] || '手动模拟器'; }
 function formatGear(gear) { return gear < 0 ? 'R' : gear === 0 ? 'N' : String(gear); }
-function u16(value) { return [value & 0xff, (value >>> 8) & 0xff]; }
-function u32(value) { return [value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff]; }
-function sum16(bytes, start = 0, end = bytes.length) {
-  let result = 0;
-  for (let i = start; i < end; i += 1) result = (result + bytes[i]) & 0xffff;
-  return result;
-}
-
-function crc16Ccitt(bytes) {
-  let crc = 0xffff;
-  for (const byte of bytes) {
-    crc ^= byte << 8;
-    for (let bit = 0; bit < 8; bit += 1) crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
-  }
-  return crc;
-}
-
-const crc32Table = (() => {
-  const table = new Uint32Array(256);
-  for (let i = 0; i < 256; i += 1) {
-    let value = i;
-    for (let bit = 0; bit < 8; bit += 1) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
-    table[i] = value >>> 0;
-  }
-  return table;
-})();
-
-function crc32(bytes) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) crc = crc32Table[(crc ^ byte) & 0xff] ^ (crc >>> 8);
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function buildFrame(command, payload) {
-  const frame = new Uint8Array(payload.length + 5);
-  frame.set([0x5a, 0xa5, command, payload.length + 2], 0);
-  frame.set(payload, 4);
-  frame[frame.length - 1] = frame.slice(2, -1).reduce((sum, byte) => (sum + byte) & 0xff, 0);
-  return frame;
-}
-
-function parseResponse(bytes, command) {
-  let offset = 0;
-  while (offset < bytes.length - 1 && !(bytes[offset] === 0x5a && bytes[offset + 1] === 0xa5)) offset += 1;
-  if (offset + 4 > bytes.length || bytes[offset + 2] !== command) return null;
-  for (let end = bytes.length; end >= offset + 4; end -= 1) {
-    let sum = 0;
-    for (let i = offset + 2; i < end - 1; i += 1) sum = (sum + bytes[i]) & 0xff;
-    if (sum === bytes[end - 1]) return bytes.slice(offset + 3, end - 1);
-  }
-  return null;
-}
-
-function parseReadRamChunk(payload, expectedChunkIndex) {
-  const status = payload[1] ?? 255;
-  const ramId = payload[2] ?? 255;
-  const activeSlot = payload[3] ?? 0;
-  const totalLength = (payload[4] ?? 0) | ((payload[5] ?? 0) << 8);
-  const chunkIndex = payload[6] ?? 255;
-  const chunkSize = payload[7] ?? 0;
-  if (status !== 0) throw new Error(`灯光读取失败，chunk ${expectedChunkIndex}，状态 ${status}`);
-  if (ramId !== LED_RAM_ID) throw new Error(`灯光读取 RAM 不一致：0x${ramId.toString(16)}`);
-  if (chunkIndex !== expectedChunkIndex) throw new Error(`灯光读取分块不一致：${chunkIndex}/${expectedChunkIndex}`);
-  if (totalLength <= 0 || totalLength > MAX_LIGHTING_RAM_SIZE) {
-    throw new Error(`灯光 RAM 长度异常：${totalLength}B`);
-  }
-  const available = Math.max(0, payload.length - 8);
-  const data = payload.slice(8, 8 + Math.min(chunkSize, available));
-  if (data.length === 0) throw new Error(`灯光读取分块 ${chunkIndex} 为空`);
-  return { activeSlot, totalLength, chunkIndex, data };
-}
-
-function encodeLightingPayload(payload) {
-  const header = new Uint8Array(12);
-  header.set([0x4c, 0x47, 0x48, 0x54], 0); // "LGHT"
-  header.set(u16(2), 4);
-  header.set(u32(payload.length), 6);
-  header.set(u16(sum16(header, 0, 10)), 10);
-  const result = new Uint8Array(header.length + payload.length + 2);
-  result.set(header, 0);
-  result.set(payload, header.length);
-  result.set(u16(sum16(payload)), header.length + payload.length);
-  return result;
-}
-
-function encodeLightingBin({ r, g, b, brightness = 100 }, vibration = false) {
-  return encodeLightingPayload(Uint8Array.from([
-    LIGHT_MODE_SOLID, r, g, b, clamp(brightness, 0, 100), vibration ? 1 : 0,
-  ]));
-}
-
-function wrapLightingBin(bin) {
-  const wrapped = new Uint8Array(bin.length + 4);
-  wrapped.set(u16(bin.length + 4), 0);
-  wrapped.set(u16(crc16Ccitt(bin)), 2);
-  wrapped.set(bin, 4);
-  return wrapped;
-}
 
 class K6Hid {
   constructor() {
@@ -204,10 +119,12 @@ class K6Hid {
     this.reportId = 0;
     this.reportSize = REPORT_FALLBACK_SIZE;
     this.queue = Promise.resolve();
+    this.lightingTransactions = new SerialTaskQueue();
     this.reportSummary = [];
     this.initialLightingRam = null;
     this.runtimeWritesEnabled = false;
     this.restorePromise = null;
+    this.disconnectListenerInstalled = false;
   }
 
   get connected() { return Boolean(this.device?.opened); }
@@ -227,13 +144,16 @@ class K6Hid {
     this.device = device;
     this.findOutputReport();
     await new Promise((resolve) => setTimeout(resolve, 180));
-    navigator.hid.addEventListener('disconnect', (event) => {
-      if (event.device === this.device) {
+    if (!this.disconnectListenerInstalled) {
+      navigator.hid.addEventListener('disconnect', (event) => {
+        if (event.device !== this.device) return;
+        this.device = null;
         this.initialLightingRam = null;
         this.runtimeWritesEnabled = false;
         setConnectedUi(false);
-      }
-    }, { once: true });
+      });
+      this.disconnectListenerInstalled = true;
+    }
     return device;
   }
 
@@ -295,12 +215,21 @@ class K6Hid {
 
   sendAndWait(command, report, timeoutMs) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => finish(new Error(`命令 0x${command.toString(16)} 响应超时`)), timeoutMs);
+      let lastUnparsed = '';
+      let settled = false;
+      const timer = setTimeout(() => {
+        const detail = lastUnparsed ? `；收到未识别回包 ${lastUnparsed}` : '';
+        finish(new Error(`命令 0x${command.toString(16)} 响应超时${detail}`));
+      }, timeoutMs);
       const onReport = (event) => {
-        const response = parseResponse(new Uint8Array(event.data.buffer), command);
+        const bytes = new Uint8Array(event.data.buffer);
+        const response = parseResponse(bytes, command);
         if (response) finish(null, response);
+        else lastUnparsed = [...bytes.slice(0, 32)].map((byte) => byte.toString(16).padStart(2, '0')).join(' ');
       };
       const finish = (error, response) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         this.device?.removeEventListener('inputreport', onReport);
         error ? reject(error) : resolve(response);
@@ -321,11 +250,10 @@ class K6Hid {
 
   async readLightingRam() {
     let expectedLength = 0;
-    let offset = 0;
     let chunkIndex = 0;
     let activeSlot = 0;
     let result = null;
-    while (expectedLength === 0 || offset < expectedLength) {
+    while (expectedLength === 0 || chunkIndex * RAM_READ_CHUNK_SIZE < expectedLength) {
       const payload = Uint8Array.from([0x00, LED_RAM_ID, chunkIndex, RAM_READ_CHUNK_SIZE]);
       const response = await this.request(COMMAND.READ_RAM, payload);
       const chunk = parseReadRamChunk(response, chunkIndex);
@@ -336,9 +264,12 @@ class K6Hid {
       } else if (chunk.totalLength !== expectedLength) {
         throw new Error(`灯光 RAM 长度在读取中变化：${chunk.totalLength}/${expectedLength}`);
       }
-      const copyLength = Math.min(chunk.data.length, expectedLength - offset);
-      result.set(chunk.data.slice(0, copyLength), offset);
-      offset += copyLength;
+      const offset = chunkIndex * RAM_READ_CHUNK_SIZE;
+      const expectedChunkLength = Math.min(RAM_READ_CHUNK_SIZE, expectedLength - offset);
+      if (chunk.data.length !== expectedChunkLength) {
+        throw new Error(`灯光读取分块 ${chunkIndex} 长度不一致：${chunk.data.length}/${expectedChunkLength}`);
+      }
+      result.set(chunk.data, offset);
       chunkIndex += 1;
       if (chunkIndex > Math.ceil(MAX_LIGHTING_RAM_SIZE / RAM_READ_CHUNK_SIZE)) {
         throw new Error('灯光 RAM 读取分块过多，已停止。');
@@ -349,6 +280,7 @@ class K6Hid {
 
   async captureInitialLighting() {
     const snapshot = await this.readLightingRam();
+    snapshot.validation = validateRestorableLightingSnapshot(snapshot.data);
     this.initialLightingRam = new Uint8Array(snapshot.data);
     this.runtimeWritesEnabled = true;
     return snapshot;
@@ -359,12 +291,11 @@ class K6Hid {
     if (!this.connected || !this.initialLightingRam) return false;
     this.runtimeWritesEnabled = false;
     const snapshot = new Uint8Array(this.initialLightingRam);
-    this.restorePromise = (async () => {
-      await this.queue.catch(() => {});
+    this.restorePromise = this.lightingTransactions.run(async () => {
       await this.abortWrite().catch(() => {});
-      await this.writeRawLightingRam(snapshot);
+      await this.writeRawLightingRamNow(snapshot);
       return true;
-    })().finally(() => { this.restorePromise = null; });
+    }).finally(() => { this.restorePromise = null; });
     return this.restorePromise;
   }
 
@@ -387,6 +318,11 @@ class K6Hid {
   }
 
   async writeRawLightingRam(wrapped) {
+    validateLightingRam(wrapped);
+    return this.lightingTransactions.run(() => this.writeRawLightingRamNow(wrapped));
+  }
+
+  async writeRawLightingRamNow(wrapped) {
     try {
       await this.writeWrappedLighting(wrapped, 16);
     } catch (firstError) {
@@ -398,6 +334,7 @@ class K6Hid {
         // Some receiver/firmware revisions reject 16-byte A4 chunks with BUSY.
         await this.writeWrappedLighting(wrapped, 8);
       } catch (retryError) {
+        await this.abortWrite().catch(() => {});
         throw new Error(`${retryError.message}（已清理事务并用 8B 分块重试；首次错误：${firstError.message}）`);
       }
     }
@@ -495,6 +432,8 @@ async function queueHardwareColor(color, label) {
 }
 
 let telemetryRequestRunning = false;
+let telemetryGeneration = 0;
+let telemetryController = null;
 let lastTelemetryStatus = '';
 
 function setSimulatorControlsEnabled(enabled) {
@@ -582,19 +521,27 @@ function applyTelemetry(data) {
   state.brake = clamp((Number(data.brake) || 0) * 100, 0, 100);
   const car = data.car ? ` · ${data.car}` : '';
   const version = data.version ? ` · v${data.version}` : '';
-  setTelemetryStatus(`${sourceName()} 实时${version}${car}`, 'live');
+  setTelemetryStatus(`${data.message || `${sourceName()} 实时`}${version}${car}`, data.status || 'live');
   render();
 }
 
 async function pollTelemetry() {
   if (!isLiveSource() || telemetryRequestRunning) return;
   telemetryRequestRunning = true;
+  const source = ui.dataSource.value;
+  const generation = telemetryGeneration;
+  const controller = new AbortController();
+  telemetryController = controller;
+  const timeout = setTimeout(() => controller.abort('timeout'), 1200);
   try {
-    const source = ui.dataSource.value;
-    const response = await fetch(`/api/telemetry?source=${source}`, { cache: 'no-store' });
+    const response = await fetch(`/api/telemetry?source=${source}`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
-    if (data.connected && data.status === 'live') {
+    if (generation !== telemetryGeneration || source !== ui.dataSource.value) return;
+    if (data.connected && ['live', 'showroom', 'replay'].includes(data.status)) {
       applyTelemetry(data);
     } else {
       state.telemetryLive = false;
@@ -606,14 +553,21 @@ async function pollTelemetry() {
       render();
     }
   } catch (error) {
+    if (generation !== telemetryGeneration || source !== ui.dataSource.value) return;
     state.telemetryLive = false;
     state.rpm = 0;
     state.gear = 0;
     state.brake = 0;
     state.telemetry = null;
-    setTelemetryStatus(`遥测桥接服务未启动（${sourceName()}）`, 'bridge-error');
+    const timedOut = controller.signal.aborted && controller.signal.reason === 'timeout';
+    setTelemetryStatus(
+      timedOut ? `${sourceName()} 遥测请求超时` : `遥测桥接服务不可用（${sourceName()}）`,
+      'bridge-error',
+    );
     render();
   } finally {
+    clearTimeout(timeout);
+    if (telemetryController === controller) telemetryController = null;
     telemetryRequestRunning = false;
   }
 }
@@ -719,20 +673,29 @@ function hasFlashingTelemetry(data) {
 function colorForTelemetry(normalized, data, shifting) {
   if (!data) return colorForState(normalized, state.brake, shifting);
   const brake = state.brake;
-  // Requested priority for the core driving cues:
-  // ABS > brake > shift > meaningful RPM band > TC > wrong-way > DRS.
-  // The normal RPM gradient is treated as an active cue only above 72% of
-  // the rev range; otherwise TC/way/DRS can be seen instead of being hidden
-  // by a low-RPM background colour.
-  if (data.absActive) return flashColor({ r: 80, g: 170, b: 255, brightness: 100 }, 'ABS熄灭', 'ABS介入');
-  if (brake > 2) return flashColor({ r: 255, g: 0, b: 0, brightness: 100 }, '刹车熄灭', '刹车', 'brake');
-  if (shifting || data.shiftUpHint) return flashColor({ r: 255, g: 0, b: 0, brightness: 100 }, '换挡熄灭', '换挡提示');
-  if (data.shiftDownHint) return flashColor({ r: 165, g: 75, b: 255, brightness: 88 }, '降挡熄灭', '降挡提示');
-  if (normalized >= 0.72) return colorForState(normalized, 0, false);
-  if (data.tcActive) return flashColor({ r: 40, g: 255, b: 110, brightness: 92 }, 'TC熄灭', 'TC介入');
-  if (data.wrongWay) return flashColor({ r: 255, g: 0, b: 0, brightness: 100 }, '逆向熄灭', '逆向警告');
-  if (data.drsActive) return flashColor({ r: 0, g: 220, b: 255, brightness: 90 }, 'DRS熄灭', 'DRS开启');
-  if (data.drsAvailable) return { r: 0, g: 165, b: 230, brightness: 70, label: 'DRS可用', alert: false };
+  // Urgent driving cues keep their requested priority. Vehicle instrumentation
+  // is intentionally above only the ordinary RPM background so an active
+  // indicator, wiper or headlight remains visible while driving.
+  const cue = selectDisplayCue(normalized, data, brake, shifting);
+  if (cue === 'abs') return flashColor({ r: 80, g: 170, b: 255, brightness: 100 }, 'ABS熄灭', 'ABS介入');
+  if (cue === 'brake') return flashColor({ r: 255, g: 0, b: 0, brightness: 100 }, '刹车熄灭', '刹车', 'brake');
+  if (cue === 'shift-up') return flashColor({ r: 255, g: 0, b: 0, brightness: 100 }, '换挡熄灭', '换挡提示');
+  if (cue === 'shift-down') return flashColor({ r: 165, g: 75, b: 255, brightness: 88 }, '降挡熄灭', '降挡提示');
+  if (cue === 'warning-lights') return flashColor({ r: 255, g: 50, b: 0, brightness: 92 }, '警告熄灭', '车辆警告灯');
+  if (cue === 'hazards') return flashColor({ r: 255, g: 150, b: 0, brightness: 78 }, '双闪熄灭', '双闪', 'indicator');
+  if (cue === 'indicator-left') return flashColor({ r: 255, g: 150, b: 0, brightness: 78 }, '左转向熄灭', '左转向', 'indicator');
+  if (cue === 'indicator-right') return flashColor({ r: 255, g: 150, b: 0, brightness: 78 }, '右转向熄灭', '右转向', 'indicator');
+  if (cue === 'flashing-lights') return flashColor({ r: 255, g: 255, b: 255, brightness: 100 }, '远光熄灭', '远光闪灯');
+  if (cue === 'wiper') return { r: 40, g: 150, b: 255, brightness: 45, label: `雨刷 ${data.wiperStage}`, alert: false };
+  if (cue === 'rain-lights') return { r: 60, g: 130, b: 255, brightness: 48, label: '雨灯', alert: false };
+  if (cue === 'headlights') return { r: 190, g: 210, b: 255, brightness: 40, label: '大灯', alert: false };
+  if (cue === 'special-lights') return { r: 45, g: 220, b: 210, brightness: 52, label: '特殊灯', alert: false };
+  if (cue === 'cockpit-lights') return { r: 255, g: 185, b: 105, brightness: 36, label: '座舱灯', alert: false };
+  if (cue === 'rpm') return colorForState(normalized, 0, false);
+  if (cue === 'tc') return flashColor({ r: 40, g: 255, b: 110, brightness: 92 }, 'TC熄灭', 'TC介入');
+  if (cue === 'wrong-way') return flashColor({ r: 255, g: 0, b: 0, brightness: 100 }, '逆向熄灭', '逆向警告');
+  if (cue === 'drs-active') return flashColor({ r: 0, g: 220, b: 255, brightness: 90 }, 'DRS熄灭', 'DRS开启');
+  if (cue === 'drs-available') return { r: 0, g: 165, b: 230, brightness: 70, label: 'DRS可用', alert: false };
 
   // Secondary vehicle-state cues are deliberately below the requested seven
   // core cues. They are still useful on road cars and in the showroom.
@@ -751,17 +714,6 @@ function colorForTelemetry(normalized, data, shifting) {
   if (data.ersCharging) return { r: 90, g: 80, b: 255, brightness: 68, label: 'ERS充电', alert: false };
   if (data.brakeTempMax > 850) return flashColor({ r: 255, g: 72, b: 0, brightness: 95 }, '刹车温度熄灭', '刹车过热');
   if (data.tireTempMax > 105) return { r: 255, g: 72, b: 0, brightness: 80, label: '轮胎偏热', alert: false };
-  if (data.warningLights) return flashColor({ r: 255, g: 50, b: 0, brightness: 92 }, '警告熄灭', '车辆警告灯');
-  if (data.hazardLights || data.indicatorLeft || data.indicatorRight) {
-    const label = data.hazardLights ? '双闪' : data.indicatorLeft ? '左转向' : '右转向';
-    return flashColor({ r: 255, g: 150, b: 0, brightness: 78 }, '转向熄灭', label, 'indicator');
-  }
-  if (data.flashingLights) return flashColor({ r: 255, g: 255, b: 255, brightness: 100 }, '远光熄灭', '远光闪灯');
-  if (data.wiperStage > 0) return { r: 40, g: 150, b: 255, brightness: 45, label: `雨刷 ${data.wiperStage}`, alert: false };
-  if (data.rainLights) return { r: 60, g: 130, b: 255, brightness: 48, label: '雨灯', alert: false };
-  if (data.headlights || data.mainLightStage > 0) return { r: 190, g: 210, b: 255, brightness: 40, label: '大灯', alert: false };
-  if (data.specialLightStage > 0) return { r: 45, g: 220, b: 210, brightness: 52, label: '特殊灯', alert: false };
-  if (data.cockpitLightStage > 0) return { r: 255, g: 185, b: 105, brightness: 36, label: '座舱灯', alert: false };
   return colorForState(normalized, brake, shifting);
 }
 
@@ -830,7 +782,7 @@ async function connectK6({ requestIfMissing = true, showAlert = true } = {}) {
     restoreBeforeClosePromise = null;
     try {
       const snapshot = await k6.captureInitialLighting();
-      log(`已备份连接时灯效：RAM 0x${LED_RAM_ID.toString(16)}，${snapshot.data.length}B，slot ${snapshot.activeSlot}`);
+      log(`已备份连接时灯效：RAM 0x${LED_RAM_ID.toString(16)}，${snapshot.data.length}B，slot ${snapshot.activeSlot}，格式 ${snapshot.validation.format}`);
     } catch (snapshotError) {
       k6.runtimeWritesEnabled = false;
       ui.packetState.textContent = `保护模式：无法备份原灯效`;
@@ -915,6 +867,8 @@ manualEffectControls.forEach((control) => {
 });
 ui.manualEffectsReset.addEventListener('click', resetManualTelemetry);
 ui.dataSource.addEventListener('change', () => {
+  telemetryGeneration += 1;
+  telemetryController?.abort('source-change');
   const simulator = !isLiveSource();
   setSimulatorControlsEnabled(simulator);
   state.telemetryLive = false;

@@ -138,6 +138,10 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
+def _kunos_gear(raw_gear: int) -> int:
+    return int(raw_gear) - 1
+
+
 class AcevoReader:
     """Read AC EVO 0.8 telemetry and expose K6-relevant event flags."""
 
@@ -192,6 +196,8 @@ class AcevoReader:
 
         physics_packet = _i32(physics, 0)
         graphics_packet = _i32(graphics, 0)
+        simulator_status = _i32(graphics, 4)
+        session_live = simulator_status == 2
         packet = (physics_packet, graphics_packet)
         if packet != self._last_packet:
             self._last_packet = packet
@@ -261,31 +267,43 @@ class AcevoReader:
         raw_lap_valid = bool(_u8(graphics, 3121))
         lap_invalid = self._lap_invalid_event.update(
             raw_active=not raw_lap_valid,
-            eligible=not stale and speed_kph > 5.0,
+            eligible=session_live and not stale and speed_kph > 5.0,
         )
         car = _text(graphics, 3086, 33)
-        packet_status = "stale" if stale else "live"
+        if stale:
+            packet_status = "stale"
+            message = "AC EVO 数据已暂停或游戏已退出。"
+        elif session_live:
+            packet_status = "live"
+            message = "AC EVO 实时遥测"
+        elif simulator_status == 1:
+            packet_status = "replay"
+            message = "AC EVO 回放仪表"
+        else:
+            packet_status = "showroom"
+            message = "AC EVO 展厅/菜单仪表"
         return {
             "source": "ac-evo",
             "connected": not stale,
             "status": packet_status,
-            "message": "AC EVO 实时遥测" if not stale else "AC EVO 数据已暂停或游戏已退出。",
+            "message": message,
+            "sessionLive": session_live,
             "version": "0.8",
             "packet": physics_packet,
-            "rpm": rpm,
-            "rpmPercent": rpm_percent,
+            "rpm": rpm if session_live else 0.0,
+            "rpmPercent": rpm_percent if session_live else 0.0,
             "maxRpm": max_rpm,
-            "gear": _i32(physics, 16, _i16(graphics, 68)),
-            "brake": brake,
-            "throttle": throttle,
-            "clutch": _clamp(_f32(physics, 364), 0.0, 1.0),
-            "speedKph": speed_kph,
+            "gear": _kunos_gear(_i32(physics, 16, _i16(graphics, 68))),
+            "brake": brake if session_live else 0.0,
+            "throttle": throttle if session_live else 0.0,
+            "clutch": _clamp(_f32(physics, 364), 0.0, 1.0) if session_live else 0.0,
+            "speedKph": speed_kph if session_live else 0.0,
             "car": car,
-            "shiftUpHint": bool(_u8(graphics, 43)) or rpm_percent >= 0.96,
-            "shiftDownHint": bool(_u8(graphics, 44)),
-            "tcActive": tc_active,
+            "shiftUpHint": session_live and (bool(_u8(graphics, 43)) or rpm_percent >= 0.96),
+            "shiftDownHint": session_live and bool(_u8(graphics, 44)),
+            "tcActive": session_live and tc_active,
             "tcIntensity": tc_intensity,
-            "absActive": abs_active,
+            "absActive": session_live and abs_active,
             "absIntensity": abs_intensity,
             "pitLimiter": bool(_i32(physics, 248)) or bool(_u8(graphics, 1910)),
             "drsAvailable": bool(_i32(physics, 340)) or bool(_u8(graphics, 53)),
@@ -296,15 +314,15 @@ class AcevoReader:
             "ersCharge": _clamp(_f32(graphics, 1248), 0.0, 1.0),
             "ersDeployCapped": bool(_u8(graphics, 55)),
             "ersChargeCapped": bool(_u8(graphics, 56)),
-            "wrongWay": bool(_u8(graphics, 52)),
+            "wrongWay": session_live and bool(_u8(graphics, 52)),
             # AC EVO reports zero both for an invalid lap and for "no lap
             # data" in garages/showrooms.  Only expose a short alert after a
             # valid-to-invalid edge while the car is actually moving.
             "lapInvalid": lap_invalid,
             "lapValidRaw": raw_lap_valid,
             "lastLap": bool(_u8(graphics, 2421)),
-            "flag": _i32(graphics, 2404),
-            "globalFlag": _i32(graphics, 2408),
+            "flag": _i32(graphics, 2404) if session_live else 0,
+            "globalFlag": _i32(graphics, 2408) if session_live else 0,
             "instrumentation": instrumentation,
             "mainLightStage": instrumentation["mainLightStage"],
             "specialLightStage": instrumentation["specialLightStage"],
@@ -323,10 +341,10 @@ class AcevoReader:
             "fuelLiters": max(0.0, _f32(graphics, 196, _f32(physics, 12))),
             "batteryTemp": _f32(graphics, 1468),
             "batteryVoltage": _f32(graphics, 1472),
-            "damage": damage,
-            "tyresOut": max(0, _i32(physics, 244)),
-            "brakeTempMax": max_brake_temp,
-            "tireTempMax": max_tire_temp,
+            "damage": damage if session_live else [],
+            "tyresOut": max(0, _i32(physics, 244)) if session_live else 0,
+            "brakeTempMax": max_brake_temp if session_live else 0.0,
+            "tireTempMax": max_tire_temp if session_live else 0.0,
             "wheels": wheels,
         }
 
