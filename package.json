@@ -1,6 +1,6 @@
 {
   "name": "k6-telemetry-console",
-  "version": "0.2.4",
+  "version": "0.2.8",
   "description": "Standalone Electron window for the Flydigi K6 telemetry light controller",
   "main": "main.js",
   "private": true,
@@ -8,7 +8,13 @@
   "license": "MIT",
   "scripts": {
     "dev": "electron .",
-    "build:bridge": ".venv\\Scripts\\python.exe -m PyInstaller --noconfirm --clean --onedir --name k6-telemetry-bridge --distpath bridge --workpath build/pyinstaller --specpath build/spec ams2_bridge.py",
+    "setup:bridge": "powershell -ExecutionPolicy Bypass -File scripts/setup-bridge.ps1",
+    "build:bridge": "powershell -ExecutionPolicy Bypass -File scripts/build-bridge.ps1",
+    "test:python": "powershell -ExecutionPolicy Bypass -File scripts/test-python.ps1",
+    "test:js": "node --test tests/runtime-core.test.mjs tests/bridge-health.test.cjs",
+    "test": "pnpm run test:python && pnpm run test:js",
+    "sync:browser": "powershell -ExecutionPolicy Bypass -File scripts/sync-browser.ps1",
+    "check:browser": "powershell -ExecutionPolicy Bypass -File scripts/sync-browser.ps1 -Check",
     "dist:portable": "pnpm run build:bridge && electron-builder --win portable",
     "dist": "pnpm run build:bridge && electron-builder --win portable nsis"
   },
@@ -23,9 +29,12 @@
     "asar": false,
     "files": [
       "main.js",
+      "bridge-health.cjs",
       "index.html",
       "app.js",
+      "runtime-core.mjs",
       "style.css",
+      "LICENSE",
       "package.json",
       "bridge/**/*"
     ],

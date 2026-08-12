@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+      <title>多游戏遥测 × Flydigi K6 Shift Light Demo</title>
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">K6</div>
+          <div>
+            <p class="eyebrow">MULTI-GAME TELEMETRY</p>
+            <h1>Shift Light <span>Console</span></h1>
+            <p class="subtitle">实时遥测与灯带控制</p>
+          </div>
+        </div>
+        <div class="connection">
+          <div class="connection-state">
+            <span id="connection-dot" class="dot"></span>
+            <span id="connection-label">未连接 K6</span>
+          </div>
+          <button id="connect-button" class="button primary">连接 K6</button>
+        </div>
+      </header>
+
+      <section class="dash" aria-label="赛车仪表模拟器">
+        <div class="dash-topline">
+          <div>
+            <span class="section-kicker">LIVE OUTPUT</span>
+            <span class="section-caption">12-zone light array</span>
+          </div>
+          <span class="live-pill"><i></i> READY</span>
+        </div>
+
+        <div id="shift-lights" class="shift-lights" aria-label="换挡提示灯"></div>
+
+        <div class="readout">
+          <div class="rpm-block">
+            <small>ENGINE SPEED</small>
+            <span id="rpm-value">3200</span>
+            <div class="readout-unit">RPM</div>
+          </div>
+          <div class="gear-block">
+            <small>GEAR</small>
+            <strong id="gear-value">3</strong>
+          </div>
+          <div class="brake-block">
+            <small>BRAKE</small>
+            <strong id="brake-value">0%</strong>
+          </div>
+        </div>
+
+        <div id="shift-message" class="shift-message">PUSH</div>
+        <div class="dash-foot"><span>OUTPUT: K6 HID</span><span>响应优先 · 状态优先于装饰</span></div>
+      </section>
+
+      <section class="controls" aria-label="控制与输出设置">
+        <div class="control-card wide range-card">
+          <div class="label-row">
+            <div class="control-title"><span class="control-icon">↗</span><label for="rpm-slider">发动机转速</label></div>
+            <span id="rpm-percent">40%</span>
+          </div>
+          <input id="rpm-slider" type="range" min="0" max="8000" step="50" value="3200">
+          <div class="scale"><span>0</span><span>2K</span><span>4K</span><span>6K</span><span>8K</span></div>
+        </div>
+
+        <div class="control-card">
+          <div class="label-row"><div class="control-title"><span class="control-icon">N</span><span>挡位</span></div><span>1 — 8</span></div>
+          <div class="gear-controls">
+            <button id="gear-down" class="button square" aria-label="降挡">−</button>
+            <span id="gear-control-value">3</span>
+            <button id="gear-up" class="button square" aria-label="升挡">＋</button>
+          </div>
+        </div>
+
+        <div class="control-card brake-card">
+          <div class="label-row"><div class="control-title"><span class="control-icon brake-icon">●</span><label for="brake-slider">刹车</label></div><span id="brake-percent">0%</span></div>
+          <input id="brake-slider" type="range" min="0" max="100" step="1" value="0">
+          <button id="brake-button" class="button danger">按住刹车（空格）</button>
+        </div>
+
+        <div class="control-card settings">
+          <div class="card-heading"><div><span class="section-kicker">TELEMETRY</span><strong>数据与输出</strong></div><span class="settings-mark">•••</span></div>
+          <div class="setting-row">
+            <label for="data-source">数据源</label>
+            <select id="data-source">
+              <option value="ams2" selected>AMS2 实时遥测</option>
+              <option value="acevo">Assetto Corsa EVO 0.8 实时遥测</option>
+              <option value="ac">Assetto Corsa 实时遥测</option>
+              <option value="acc">Assetto Corsa Competizione 实时遥测</option>
+              <option value="lmu">Le Mans Ultimate 实时遥测</option>
+              <option value="fh5">Forza Horizon 5 UDP 遥测</option>
+              <option value="fh6">Forza Horizon 6 UDP 遥测</option>
+              <option value="simulator">手动模拟器</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label for="max-rpm">红线转速</label>
+            <input id="max-rpm" type="number" min="1000" max="30000" step="100" value="8000">
+          </div>
+          <div class="setting-row">
+            <label for="shift-rpm">换挡提示</label>
+            <input id="shift-rpm" type="number" min="800" max="30000" step="100" value="7200">
+          </div>
+          <label class="toggle"><input id="auto-sweep" type="checkbox"><span>自动扫转速</span></label>
+          <label class="toggle"><input id="hardware-output" type="checkbox" checked><span>向 K6 输出灯效</span></label>
+          <label class="toggle"><input id="vibration-link" type="checkbox"><span>K6 震动同步灯效</span></label>
+        </div>
+
+        <div id="manual-effects-card" class="control-card wide effect-simulator">
+          <div class="card-heading effect-heading">
+            <div>
+              <span class="section-kicker">AC EVO EFFECT LAB</span>
+              <strong>手动灯效模拟</strong>
+            </div>
+            <button id="manual-effects-reset" class="button compact" type="button">全部复位</button>
+          </div>
+          <p class="effect-help">选择“手动模拟器”后，可单独触发 AC EVO 支持的驾驶辅助、车辆灯光与赛车状态。多个状态同时开启时遵循实际灯效优先级。</p>
+
+          <div class="effect-groups">
+            <fieldset class="effect-group">
+              <legend>驾驶动态</legend>
+              <div class="effect-grid">
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="absActive"><span><strong>ABS 介入</strong><small>蓝色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="tcActive"><span><strong>TC 介入</strong><small>绿色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="shiftUpHint"><span><strong>升挡提示</strong><small>红色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="shiftDownHint"><span><strong>降挡提示</strong><small>紫色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="wrongWay"><span><strong>逆向警告</strong><small>红色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="drsAvailable"><span><strong>DRS 可用</strong><small>蓝色常亮</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="drsActive"><span><strong>DRS 开启</strong><small>青色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="pitLimiter"><span><strong>进站限速</strong><small>黄色常亮</small></span></label>
+              </div>
+            </fieldset>
+
+            <fieldset class="effect-group">
+              <legend>车辆灯光</legend>
+              <div class="effect-grid">
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="indicatorLeft"><span><strong>左转向灯</strong><small>琥珀色慢闪</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="indicatorRight"><span><strong>右转向灯</strong><small>琥珀色慢闪</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="hazardLights"><span><strong>双闪</strong><small>琥珀色慢闪</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="headlights"><span><strong>大灯</strong><small>冷白常亮</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="flashingLights"><span><strong>远光闪灯</strong><small>白色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="rainLights"><span><strong>雨灯</strong><small>蓝色常亮</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="warningLights"><span><strong>车辆警告灯</strong><small>红色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="specialLightStage"><span><strong>特殊灯</strong><small>青色常亮</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="cockpitLightStage"><span><strong>座舱灯</strong><small>暖白常亮</small></span></label>
+                <label class="effect-select"><span><strong>雨刷</strong><small>蓝色常亮</small></span><select data-manual-field="wiperStage"><option value="0">关闭</option><option value="1">1 挡</option><option value="2">2 挡</option><option value="3">3 挡</option></select></label>
+              </div>
+            </fieldset>
+
+            <fieldset class="effect-group">
+              <legend>赛车状态</legend>
+              <div class="effect-grid">
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="flagActive"><span><strong>赛道旗帜</strong><small>黄色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="damageSevere"><span><strong>严重损伤</strong><small>红色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="lapInvalid"><span><strong>圈速无效</strong><small>橙色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="tyresOutActive"><span><strong>四轮出界</strong><small>橙色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="brakeOverheat"><span><strong>刹车过热</strong><small>橙色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="tireOverheat"><span><strong>轮胎过热</strong><small>橙色常亮</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="ersCharging"><span><strong>ERS 充电</strong><small>紫蓝常亮</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="ersOvertake"><span><strong>ERS 超车</strong><small>紫色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="ersHeat"><span><strong>ERS 过热</strong><small>红色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="ersDeployCapped"><span><strong>ERS 输出受限</strong><small>红色闪烁</small></span></label>
+                <label class="effect-toggle"><input type="checkbox" data-manual-field="ersChargeCapped"><span><strong>ERS 充电受限</strong><small>橙色闪烁</small></span></label>
+              </div>
+            </fieldset>
+          </div>
+        </div>
+
+      </section>
+
+      <section class="status-panel" aria-label="运行状态">
+        <div><span>灯带状态</span><strong id="light-state">绿色 · 4/12</strong></div>
+        <div><span>HID 报文</span><strong id="packet-state">等待连接</strong></div>
+        <div><span>数据源</span><strong id="data-source-state">正在等待 AMS2</strong></div>
+        <div><span>驾驶状态</span><strong id="telemetry-events">等待数据</strong></div>
+      </section>
+
+      <details class="log-panel">
+        <summary>协议日志</summary>
+        <pre id="log-output">Demo 已就绪。请使用 Chrome/Edge 打开并连接 K6。</pre>
+      </details>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

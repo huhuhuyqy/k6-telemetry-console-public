@@ -1,13 +1,17 @@
 const { app, BrowserWindow, session } = require('electron');
 const { spawn, spawnSync } = require('node:child_process');
+const { randomBytes } = require('node:crypto');
 const http = require('node:http');
 const path = require('node:path');
+const { version: BRIDGE_VERSION } = require('./package.json');
+const { matchesBridgeHealth } = require('./bridge-health.cjs');
 
 const BRIDGE_PORT = Number(process.env.K6_ELECTRON_PORT || 8766);
 const SMOKE_TEST_CLOSE = process.env.K6_ELECTRON_SMOKE_TEST_CLOSE === '1';
 const LIGHT_RESTORE_TIMEOUT_MS = 8000;
 const FLYDIGI_VENDOR_ID = 0x37d7;
 const FLYDIGI_K6_PRODUCT_ID = 0x2502;
+const BRIDGE_TOKEN = randomBytes(24).toString('hex');
 
 // The HID scheduler runs in the renderer.  Chromium normally reduces timer
 // frequency when another exclusive-fullscreen window fully occludes Electron,
@@ -21,6 +25,8 @@ let bridgeProcess = null;
 let quitInProgress = false;
 let allowWindowClose = false;
 let shutdownPromise = null;
+let bridgeFailure = null;
+let hidPermissionsConfigured = false;
 
 function isAllowedOrigin(origin) {
   try {
@@ -31,21 +37,25 @@ function isAllowedOrigin(origin) {
   }
 }
 
+function isK6Device(device) {
+  return device?.vendorId === FLYDIGI_VENDOR_ID && device?.productId === FLYDIGI_K6_PRODUCT_ID;
+}
+
 function configureHidPermissions() {
+  if (hidPermissionsConfigured) return;
   const ses = session.defaultSession;
   ses.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => (
     permission === 'hid' && isAllowedOrigin(requestingOrigin)
   ));
   ses.setDevicePermissionHandler((details) => (
-    details.deviceType === 'hid' && isAllowedOrigin(details.origin)
+    details.deviceType === 'hid' && isAllowedOrigin(details.origin) && isK6Device(details.device)
   ));
   ses.on('select-hid-device', (event, details, callback) => {
     event.preventDefault();
-    const device = (details.deviceList || []).find((item) => (
-      item.vendorId === FLYDIGI_VENDOR_ID && item.productId === FLYDIGI_K6_PRODUCT_ID
-    ));
+    const device = (details.deviceList || []).find(isK6Device);
     callback(device?.deviceId || '');
   });
+  hidPermissionsConfigured = true;
 }
 
 function bridgeExecutable() {
@@ -54,11 +64,14 @@ function bridgeExecutable() {
 }
 
 function startBridge() {
+  bridgeFailure = null;
   const executable = bridgeExecutable();
   const args = [
     '--port', String(BRIDGE_PORT),
     '--root', __dirname,
     '--parent-pid', String(process.pid),
+    '--bridge-token', BRIDGE_TOKEN,
+    '--bridge-version', BRIDGE_VERSION,
   ];
   const child = spawn(executable, args, {
     cwd: __dirname,
@@ -66,11 +79,16 @@ function startBridge() {
     stdio: 'ignore',
   });
   bridgeProcess = child;
-  child.on('error', (error) => console.error(`Unable to start telemetry bridge: ${error.message}`));
+  child.on('error', (error) => {
+    bridgeFailure = `Unable to start telemetry bridge: ${error.message}`;
+    console.error(bridgeFailure);
+  });
   child.on('exit', (code, signal) => {
     if (bridgeProcess === child) bridgeProcess = null;
+    if (!quitInProgress && (code || signal)) bridgeFailure = `Telemetry bridge exited (${code ?? signal})`;
     if (!quitInProgress && (code || signal)) console.error(`Telemetry bridge exited (${code ?? signal})`);
   });
+  return child;
 }
 
 // Stop synchronously: an asynchronous taskkill can be terminated together
@@ -134,15 +152,40 @@ function beginGracefulShutdown() {
   return shutdownPromise;
 }
 
-function waitForBridge(retries = 80) {
+function waitForBridge(child, retries = 80) {
   return new Promise((resolve, reject) => {
     const probe = () => {
-      const request = http.get({ hostname: '127.0.0.1', port: BRIDGE_PORT, path: '/' }, (response) => {
-        response.resume();
-        resolve();
+      if (bridgeFailure || child.exitCode !== null) {
+        reject(new Error(bridgeFailure || `Telemetry bridge exited (${child.exitCode})`));
+        return;
+      }
+      const request = http.get({ hostname: '127.0.0.1', port: BRIDGE_PORT, path: '/api/health' }, (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('end', () => {
+          try {
+            const health = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            const matches = response.statusCode === 200 && matchesBridgeHealth(health, {
+              version: BRIDGE_VERSION,
+              token: BRIDGE_TOKEN,
+              childPid: child.pid,
+              parentPid: process.pid,
+            });
+            if (!matches) {
+              reject(new Error(`端口 ${BRIDGE_PORT} 已被其他或旧版服务占用。`));
+              return;
+            }
+            resolve();
+          } catch {
+            reject(new Error(`端口 ${BRIDGE_PORT} 返回的不是 K6 遥测桥接服务。`));
+          }
+        });
       });
+      request.setTimeout(300, () => request.destroy());
       request.on('error', () => {
-        if (retries <= 0) reject(new Error(`遥测桥接服务未能在端口 ${BRIDGE_PORT} 启动`));
+        if (bridgeFailure || child.exitCode !== null) {
+          reject(new Error(bridgeFailure || `Telemetry bridge exited (${child.exitCode})`));
+        } else if (retries <= 0) reject(new Error(`遥测桥接服务未能在端口 ${BRIDGE_PORT} 启动`));
         else {
           retries -= 1;
           setTimeout(probe, 100);
@@ -186,8 +229,8 @@ function createWindow() {
 
 async function boot() {
   configureHidPermissions();
-  startBridge();
-  await waitForBridge();
+  const child = startBridge();
+  await waitForBridge(child);
   createWindow();
 }
 
@@ -206,7 +249,9 @@ if (!gotLock) {
     app.quit();
   });
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) boot().catch((error) => console.error(error));
+    if (BrowserWindow.getAllWindows().length === 0 && !bridgeProcess) {
+      boot().catch((error) => console.error(error));
+    }
   });
   app.on('before-quit', (event) => {
     if (!allowWindowClose && mainWindow && !mainWindow.isDestroyed()) {
